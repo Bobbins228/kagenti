@@ -67,7 +67,7 @@ spec:
       revision: ${GIT_BRANCH}
     contextDir: ${GIT_PATH}
   strategy:
-    name: buildah-insecure
+    name: buildah-insecure-push
     kind: ClusterBuildStrategy
   output:
     image: ${REGISTRY}/${TOOL_NAME}:${IMAGE_TAG}
@@ -131,10 +131,8 @@ fi
 # Step 4: Get the output image
 echo ""
 echo "Step 4: Retrieving output image..."
-OUTPUT_IMAGE=$(kubectl get buildrun "${BUILDRUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.output.image}')
-OUTPUT_DIGEST=$(kubectl get buildrun "${BUILDRUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.output.digest}')
+OUTPUT_IMAGE=$(kubectl get buildrun "${BUILDRUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.buildSpec.output.image}')
 echo "Output Image: ${OUTPUT_IMAGE}"
-echo "Output Digest: ${OUTPUT_DIGEST}"
 
 # Step 5: Create Deployment for the tool
 echo ""
@@ -177,6 +175,9 @@ spec:
         - name: mcp
           image: ${OUTPUT_IMAGE}
           imagePullPolicy: Always
+          env:
+          - name: UV_CACHE_DIR
+            value: "/tmp/.cache/uv"
           ports:
             - containerPort: 8000
               name: http

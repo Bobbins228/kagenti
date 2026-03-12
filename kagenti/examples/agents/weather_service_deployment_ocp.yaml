@@ -39,6 +39,10 @@ spec:
           value: "8000"
         - name: HOST
           value: "0.0.0.0"
+        # Set OTEL_SDK_DISABLED=true to skip telemetry when no collector is deployed
+        # - name: OTEL_SDK_DISABLED
+        #   value: "true"
+        # Optional: enable when otel-collector is running in kagenti-system
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector.kagenti-system.svc.cluster.local:8335"
         - name: KEYCLOAK_URL
