@@ -1334,6 +1334,24 @@ fi
 
 log_info "Keycloak: realm=$KC_REALM namespace=$KC_NAMESPACE"
 
+# Read the actual Keycloak admin credentials from the operator-managed secret.
+# The RHBK operator creates keycloak-initial-admin with a random password.
+# The kagenti chart creates keycloak-admin-secret in agent namespaces for the
+# client-registration sidecar — these must match, otherwise client-registration
+# can't authenticate to the master realm to register per-agent OAuth clients.
+KC_ADMIN_FLAGS=()
+_kc_admin_user=$($KUBECTL get secret keycloak-initial-admin -n "$KC_NAMESPACE" \
+  -o jsonpath='{.data.username}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+_kc_admin_pass=$($KUBECTL get secret keycloak-initial-admin -n "$KC_NAMESPACE" \
+  -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+if [ -n "$_kc_admin_user" ] && [ -n "$_kc_admin_pass" ]; then
+  KC_ADMIN_FLAGS+=(--set "keycloak.adminUsername=${_kc_admin_user}")
+  KC_ADMIN_FLAGS+=(--set "keycloak.adminPassword=${_kc_admin_pass}")
+  log_success "Keycloak admin credentials read from keycloak-initial-admin"
+else
+  log_warn "Could not read keycloak-initial-admin — agent client-registration may fail"
+fi
+
 # Build operator image override flags
 OPERATOR_IMAGE_FLAGS=()
 if [ -n "$OPERATOR_IMAGE" ]; then
@@ -1361,6 +1379,7 @@ run_cmd helm upgrade --install kagenti "$KAGENTI_REPO/charts/kagenti/" \
   -f "$SECRETS_FILE" \
   ${KAGENTI_UI_FLAGS[@]+"${KAGENTI_UI_FLAGS[@]}"} \
   ${OPERATOR_IMAGE_FLAGS[@]+"${OPERATOR_IMAGE_FLAGS[@]}"} \
+  ${KC_ADMIN_FLAGS[@]+"${KC_ADMIN_FLAGS[@]}"} \
   ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} \
   --set "agentOAuthSecret.spiffePrefix=spiffe://${DOMAIN}/sa" \
   --set uiOAuthSecret.useServiceAccountCA=false \
@@ -1369,11 +1388,11 @@ run_cmd helm upgrade --install kagenti "$KAGENTI_REPO/charts/kagenti/" \
   --set mlflow.auth.enabled=false \
   --set "keycloak.publicUrl=${KEYCLOAK_PUBLIC_URL}" \
   --set "keycloak.realm=${KC_REALM}" \
-  --set "mcpGateway.openshiftDomain=${DOMAIN}" \
   --set "components.mlflow.enabled=$([ "$SKIP_MLFLOW" = true ] && echo false || echo true)" \
   --set "components.mlflow.routeNamespace=${MLFLOW_NAMESPACE}" \
   --set "kagenti-operator-chart.mlflow.enable=$([ "$SKIP_MLFLOW" = true ] && echo false || echo true)" \
   --set "kagenti-operator-chart.featureGates.injectTools=true" \
+  --set "kagenti-operator-chart.kuadrant.enable=${WITH_KUADRANT}" \
   --set "featureFlags.agentSandbox=${WITH_AGENT_SANDBOX}"
 
 log_success "Kagenti installed"
@@ -1391,7 +1410,7 @@ else
   if ! $DRY_RUN; then
     _EXP_WS="${MLFLOW_WORKSPACE:-team1}"
     _EXP_NAME="kagenti-traces"
-    _EXP_TOKEN=$($KUBECTL create token otel-collector -n kagenti-system --duration=600s 2>/dev/null || true)
+    _EXP_TOKEN=$($KUBECTL create token otel-collector -n kagenti-system --duration=600s 2>/dev/null)
     if [ -n "$_EXP_TOKEN" ]; then
       _EXP_RESP=$($KUBECTL run mlflow-exp-create --rm -i --restart=Never \
         --image=curlimages/curl -n kagenti-system \
@@ -1401,9 +1420,9 @@ else
         -H "x-mlflow-workspace: '"$_EXP_WS"'" \
         -H "Content-Type: application/json" \
         -d "{\"name\":\"'"$_EXP_NAME"'\"}" \
-        "https://mlflow.'"${MLFLOW_NAMESPACE}"'.svc.cluster.local:8443/api/2.0/mlflow/experiments/create"' 2>/dev/null || true)
+        "https://mlflow.'"${MLFLOW_NAMESPACE}"'.svc.cluster.local:8443/api/2.0/mlflow/experiments/create"' 2>/dev/null)
       if echo "$_EXP_RESP" | grep -q "experiment_id"; then
-        _EXP_ID=$(echo "$_EXP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['experiment_id'])" 2>/dev/null || true)
+        _EXP_ID=$(echo "$_EXP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['experiment_id'])" 2>/dev/null)
         log_success "Created MLflow experiment '$_EXP_NAME' (id=$_EXP_ID) in workspace $_EXP_WS"
       elif echo "$_EXP_RESP" | grep -q "RESOURCE_ALREADY_EXISTS"; then
         log_success "MLflow experiment '$_EXP_NAME' already exists in workspace $_EXP_WS"
@@ -1612,20 +1631,13 @@ if $WITH_KUADRANT; then
 
   if ! $DRY_RUN; then
     _wait_deployment_ready kuadrant-operator-controller-manager "$KUADRANT_NS" "Kuadrant operator"
-
-    if $KUBECTL get crd kuadrants.kuadrant.io &>/dev/null; then
-      log_info "Creating Kuadrant CR..."
-      _kuadrant_api=$($KUBECTL get crd kuadrants.kuadrant.io -o jsonpath='{.spec.versions[?(@.served==true)].name}' | awk '{print $NF}')
-      $KUBECTL apply -f - <<EOF
-apiVersion: kuadrant.io/${_kuadrant_api}
-kind: Kuadrant
-metadata:
-  name: kuadrant
-  namespace: ${KUADRANT_NS}
-EOF
-    else
-      log_info "Kuadrant CRD not present (v1.4+) — skipping CR creation"
-    fi
+    # Kuadrant CR is created by the kagenti-operator's Kuadrant operand controller
+    # when --enable-kuadrant is set (see kagenti-operator chart values).
+    # The operator was installed before the Kuadrant CRD existed, so restart it
+    # to trigger KuadrantCRDExists() re-evaluation and controller registration.
+    log_info "Restarting kagenti-operator to pick up Kuadrant CRD..."
+    $KUBECTL rollout restart deployment/kagenti-controller-manager -n kagenti-system
+    _wait_deployment_ready kagenti-controller-manager kagenti-system "kagenti-operator"
   fi
 
   log_success "Kuadrant installed"
@@ -1641,6 +1653,8 @@ log_info "Step 5b: Install MCP Gateway"
 
 if $SKIP_MCP_GATEWAY; then
   log_info "Skipped (--skip-mcp-gateway)"
+elif helm status mcp-gateway -n mcp-system &>/dev/null; then
+  log_info "MCP Gateway already installed — skipping"
 else
   if ! $DRY_RUN; then
     # Clean up any MCPGatewayExtension stuck in deletion (e.g. leftover from a prior
