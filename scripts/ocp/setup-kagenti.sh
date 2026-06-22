@@ -1393,6 +1393,7 @@ run_cmd helm upgrade --install kagenti "$KAGENTI_REPO/charts/kagenti/" \
   --set "kagenti-operator-chart.mlflow.enable=$([ "$SKIP_MLFLOW" = true ] && echo false || echo true)" \
   --set "kagenti-operator-chart.featureGates.injectTools=true" \
   --set "kagenti-operator-chart.kuadrant.enable=${WITH_KUADRANT}" \
+  --set "mcpGateway.openshiftDomain=${DOMAIN}" \
   --set "featureFlags.agentSandbox=${WITH_AGENT_SANDBOX}"
 
 log_success "Kagenti installed"
@@ -1410,7 +1411,7 @@ else
   if ! $DRY_RUN; then
     _EXP_WS="${MLFLOW_WORKSPACE:-team1}"
     _EXP_NAME="kagenti-traces"
-    _EXP_TOKEN=$($KUBECTL create token otel-collector -n kagenti-system --duration=600s 2>/dev/null)
+    _EXP_TOKEN=$($KUBECTL create token otel-collector -n kagenti-system --duration=600s 2>/dev/null || true)
     if [ -n "$_EXP_TOKEN" ]; then
       _EXP_RESP=$($KUBECTL run mlflow-exp-create --rm -i --restart=Never \
         --image=curlimages/curl -n kagenti-system \
@@ -1420,9 +1421,9 @@ else
         -H "x-mlflow-workspace: '"$_EXP_WS"'" \
         -H "Content-Type: application/json" \
         -d "{\"name\":\"'"$_EXP_NAME"'\"}" \
-        "https://mlflow.'"${MLFLOW_NAMESPACE}"'.svc.cluster.local:8443/api/2.0/mlflow/experiments/create"' 2>/dev/null)
+        "https://mlflow.'"${MLFLOW_NAMESPACE}"'.svc.cluster.local:8443/api/2.0/mlflow/experiments/create"' 2>/dev/null || true)
       if echo "$_EXP_RESP" | grep -q "experiment_id"; then
-        _EXP_ID=$(echo "$_EXP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['experiment_id'])" 2>/dev/null)
+        _EXP_ID=$(echo "$_EXP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['experiment_id'])" 2>/dev/null || true)
         log_success "Created MLflow experiment '$_EXP_NAME' (id=$_EXP_ID) in workspace $_EXP_WS"
       elif echo "$_EXP_RESP" | grep -q "RESOURCE_ALREADY_EXISTS"; then
         log_success "MLflow experiment '$_EXP_NAME' already exists in workspace $_EXP_WS"
